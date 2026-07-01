@@ -1,227 +1,154 @@
-#ifndef SMART_WIFI_H
-#define SMART_WIFI_H
-
+#pragma once
 #include <WiFi.h>
 #include <Preferences.h>
+#include <WiFiManager.h>
 
-#define MAX_WIFI 100
+#define MAX_WIFI_PROFILES 10
+#define WIFI_CONNECT_TIMEOUT_MS 6000 // 한 와이파이당 최대 대기 시간 (6초)
 
-struct WifiItem
-{
-    String ssid;
-    String password;
-    String bssid;
+struct WifiProfile {
+    char ssid[33];
+    char password[65];
 };
 
-Preferences smartPrefs;
-
-WifiItem wifiList[MAX_WIFI];
-int wifiCount = 0;
-
-// ===== 내부 유틸 =====
-bool loadWifiList()
-{
-    smartPrefs.begin("smartwifi", true);
-
-    wifiCount = smartPrefs.getInt("count", 0);
-    if (wifiCount > MAX_WIFI)
-        wifiCount = MAX_WIFI;
-
-    for (int i = 0; i < wifiCount; i++)
-    {
-        String base = "w" + String(i);
-
-        wifiList[i].ssid = smartPrefs.getString((base + "_s").c_str(), "");
-        wifiList[i].password = smartPrefs.getString((base + "_p").c_str(), "");
-        wifiList[i].bssid = smartPrefs.getString((base + "_b").c_str(), "");
-    }
-
-    smartPrefs.end();
-    return true;
-}
-
-bool saveWifiList()
-{
-    smartPrefs.begin("smartwifi", false);
-
-    smartPrefs.putInt("count", wifiCount);
-
-    for (int i = 0; i < wifiCount; i++)
-    {
-        String base = "w" + String(i);
-
-        smartPrefs.putString((base + "_s").c_str(), wifiList[i].ssid);
-        smartPrefs.putString((base + "_p").c_str(), wifiList[i].password);
-        smartPrefs.putString((base + "_b").c_str(), wifiList[i].bssid);
-    }
-
-    smartPrefs.end();
-    return true;
-}
-
-// ===== AP Scan =====
-int scanMatchedIndex()
-{
-    int n = WiFi.scanNetworks();
-
-    if (n <= 0)
-        return -1;
-
-    for (int i = 0; i < n; i++)
-    {
-        String scanBssid = WiFi.BSSIDstr(i);
-
-        for (int j = 0; j < wifiCount; j++)
-        {
-            if (wifiList[j].bssid == scanBssid)
-            {
-                return j;
+// 1. NVS에서 저장된 와이파이 리스트를 불러오는 함수
+int loadWifiProfiles(WifiProfile* profiles) {
+    Preferences wifiPrefs;
+    wifiPrefs.begin("wifi_list", true); // 읽기 전용 모드
+    
+    int count = 0;
+    for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+        String keySsid = "s" + String(i);
+        String keyPw = "p" + String(i);
+        
+        if (wifiPrefs.isKey(keySsid.c_str())) {
+            String s = wifiPrefs.getString(keySsid.c_str(), "");
+            String p = wifiPrefs.getString(keyPw.c_str(), "");
+            if (s.length() > 0) {
+                strncpy(profiles[count].ssid, s.c_str(), sizeof(profiles[count].ssid));
+                strncpy(profiles[count].password, p.c_str(), sizeof(profiles[count].password));
+                count++;
             }
         }
     }
-
-    return -1;
+    wifiPrefs.end();
+    return count;
 }
 
-// ===== 연결 =====
-bool connectWiFi(int index)
-{
-    if (index < 0 || index >= wifiCount)
-        return false;
+// 2. 새 와이파이를 NVS에 중복 체크 후 추가 저장하는 함수
+void saveWifiProfile(const char* ssid, const char* password) {
+    if (strlen(ssid) == 0) return;
 
-    WiFi.begin(wifiList[index].ssid.c_str(),
-               wifiList[index].password.c_str());
+    Preferences wifiPrefs;
+    wifiPrefs.begin("wifi_list", false); // 읽기/쓰기 모드
 
-    unsigned long start = millis();
+    WifiProfile tempProfiles[MAX_WIFI_PROFILES];
+    int count = 0;
+    bool alreadyExists = false;
 
-    while (WiFi.status() != WL_CONNECTED)
-    {
-        delay(200);
-
-        if (millis() - start > 10000)
-        {
-            return false;
+    for (int i = 0; i < MAX_WIFI_PROFILES; i++) {
+        String keySsid = "s" + String(i);
+        if (wifiPrefs.isKey(keySsid.c_str())) {
+            String s = wifiPrefs.getString(keySsid.c_str(), "");
+            if (s == String(ssid)) {
+                alreadyExists = true;
+                String keyPw = "p" + String(i);
+                wifiPrefs.putString(keyPw.c_str(), password); // 비밀번호만 갱신
+                Serial.println("[NVS] 기존 와이파이 비밀번호 업데이트 완료.");
+                break;
+            }
+            count++;
         }
     }
 
-    return true;
+    if (!alreadyExists) {
+        int targetIndex = (count < MAX_WIFI_PROFILES) ? count : (MAX_WIFI_PROFILES - 1); 
+        String keySsid = "s" + String(targetIndex);
+        String keyPw = "p" + String(targetIndex);
+        
+        wifiPrefs.putString(keySsid.c_str(), ssid);
+        wifiPrefs.putString(keyPw.c_str(), password);
+        Serial.printf("[NVS] 새 와이파이 저장 완료 (슬롯 %d): %s\n", targetIndex, ssid);
+    }
+    wifiPrefs.end();
 }
-#include <WiFiManager.h>
 
-// ===== 신규 저장 =====
-bool addWifi(String ssid, String password, String bssid)
-{
-    // 이미 존재하면 업데이트
-    for (int i = 0; i < wifiCount; i++)
-    {
-        if (wifiList[i].bssid == bssid)
-        {
-            wifiList[i].ssid = ssid;
-            wifiList[i].password = password;
-            saveWifiList();
-            return true;
+// 3. 메인 와이파이 제어 함수 (goto 에러 해결 버전)
+bool startSmartWiFi(const char* apName, bool forceApMode = false) {
+    WiFi.mode(WIFI_STA);
+    WiFi.disconnect();
+    delay(100);
+
+    bool connected = false;
+
+    // 💡 변경 포인트: forceApMode가 false일 때만 주변 스캔 및 NVS 검색을 안전하게 수행
+    if (!forceApMode) {
+        WifiProfile storedProfiles[MAX_WIFI_PROFILES];
+        int storedCount = loadWifiProfiles(storedProfiles);
+        Serial.printf("[WiFi] NVS에서 로드된 와이파이 개수: %d개\n", storedCount);
+
+        if (storedCount > 0) {
+            Serial.println("[WiFi] 주변 와이파이 스캔 중...");
+            int n = WiFi.scanNetworks();
+            Serial.printf("[WiFi] 스캔 완료. 주변에 %d개의 네트워크 감지됨.\n", n);
+
+            if (n > 0) {
+                // RSSI(신호 세기)가 높은 순서대로 차례로 순회
+                for (int i = 0; i < n; ++i) {
+                    String scannedSSID = WiFi.SSID(i);
+                    int32_t rssi = WiFi.RSSI(i);
+                    
+                    for (int j = 0; j < storedCount; j++) {
+                        if (scannedSSID == String(storedProfiles[j].ssid)) {
+                            Serial.printf("\n[매칭 성공] %s (%d dBm) 접속 시도 중...", storedProfiles[j].ssid, rssi);
+                            
+                            WiFi.begin(storedProfiles[j].ssid, storedProfiles[j].password);
+                            
+                            unsigned long startAttemptTime = millis();
+                            while (WiFi.status() != WL_CONNECTED && millis() - startAttemptTime < WIFI_CONNECT_TIMEOUT_MS) {
+                                delay(200);
+                                Serial.print(".");
+                            }
+
+                            if (WiFi.status() == WL_CONNECTED) {
+                                Serial.println("\n🎉 와이파이 최종 접속 성공!");
+                                connected = true;
+                                break;
+                            } else {
+                                Serial.println("\n❌ 접속 실패(인터넷 먹통/오류). 다음 와이파이 검사로 넘어갑니다.");
+                                WiFi.disconnect();
+                                delay(100);
+                            }
+                        }
+                    }
+                    if (connected) break; // 루프 탈출
+                }
+            }
+            WiFi.scanDelete();
         }
+    } else {
+        Serial.println("\n[WiFi] 강제 설정 모드 발동! 순회 접속을 스킵합니다.");
     }
 
-    // 새로 추가
-    if (wifiCount < MAX_WIFI)
-    {
-        wifiList[wifiCount].ssid = ssid;
-        wifiList[wifiCount].password = password;
-        wifiList[wifiCount].bssid = bssid;
-
-        wifiCount++;
-
-        saveWifiList();
+    // NVS로 접속 성공했다면 바로 true 반환하여 셋업창을 켜지 않음
+    if (connected) {
         return true;
     }
 
-    // 꽉 찼으면 FIFO (0 삭제)
-    for (int i = 1; i < MAX_WIFI; i++)
-    {
-        wifiList[i - 1] = wifiList[i];
-    }
-
-    wifiList[MAX_WIFI - 1].ssid = ssid;
-    wifiList[MAX_WIFI - 1].password = password;
-    wifiList[MAX_WIFI - 1].bssid = bssid;
-
-    saveWifiList();
-    return true;
-}
-
-// ===== WiFiManager fallback =====
-bool runWiFiManager(String fallbackName)
-{
+    // 접속된 적이 없거나, 다 실패했거나, forceApMode가 true일 때 셋업 웹창 진입
+    Serial.println("\n⚠️ 접속 가능한 와이파이가 없으므로 WiFiManager 설정창을 활성화합니다.");
+    
     WiFiManager wm;
-
-    bool res = wm.autoConnect(fallbackName.c_str());
-
-    if (!res)
-        return false;
-
-    return true;
-}
-
-// ===== V2.3 → V2.4 마이그레이션 =====
-void migrateLegacyWiFi()
-{
-    Preferences p;
-    p.begin("config", true);
-
-    String oldSSID = p.getString("ssid", "");
-    String oldPASS = p.getString("pass", "");
-
-    p.end();
-
-    if (oldSSID.length() == 0)
-        return;
-
-    String bssid = WiFi.BSSIDstr();
-
-    if (bssid.length() == 0)
-        return;
-
-    addWifi(oldSSID, oldPASS, bssid);
-
-    // 삭제 (무시 처리)
-    p.begin("config", false);
-    p.remove("ssid");
-    p.remove("pass");
-    p.end();
-}
-
-// ===== 핵심 실행 함수 =====
-bool startSmartWiFi(String fallbackName)
-{
-    loadWifiList();
-
-    int index = scanMatchedIndex();
-
-    if (index >= 0)
-    {
-        if (connectWiFi(index))
-        {
-            return true;
-        }
-    }
-
-    // fallback WiFiManager
-    if (!runWiFiManager(fallbackName))
-    {
+    wm.setConfigPortalTimeout(180); // 3분 타임아웃 안전장치
+    
+    if (!wm.startConfigPortal(apName)) {
+        Serial.println("[WiFi] 설정창 타임아웃 종료.");
         return false;
     }
 
-    // 연결 후 정보 저장
-    String ssid = WiFi.SSID();
-    String pass = ""; // WiFiManager 내부 저장값 사용 안하면 빈값 처리
-    String bssid = WiFi.BSSIDstr();
-
-    addWifi(ssid, pass, bssid);
-
-    migrateLegacyWiFi();
-
+    // 새 장소에서 접속 성공 시 기존 10개 리스트를 유지한 채 새 프로필만 추가 저장
+    Serial.println("[WiFi] 웹 설정창을 통한 새 와이파이 접속 성공!");
+    saveWifiProfile(WiFi.SSID().c_str(), WiFi.psk().c_str());
+    
     return true;
 }
-
-#endif
